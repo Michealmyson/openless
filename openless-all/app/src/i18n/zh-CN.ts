@@ -28,10 +28,14 @@ export const zhCN = {
     durationMinutes: '{{value}} 分钟',
   },
   capsule: {
-    thinking: 'thinking',
+    thinking: '正在思考中',
+    recordingElapsed: '录音中 {{time}}',
+    transcribing: '正在识别…',
+    polishing: '正在润色…',
+    inserting: '正在插入…',
     cancelled: '已取消',
     error: '出错了',
-    inserted: '已插入 {{count}}',
+    inserted: '已插入 {{count}} 字',
     translating: '正在翻译',
   },
   qa: {

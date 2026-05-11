@@ -30,10 +30,14 @@ export const zhTW: typeof zhCN = {
     durationMinutes: '{{value}} 分鐘',
   },
   capsule: {
-    thinking: 'thinking',
+    thinking: '正在思考中',
+    recordingElapsed: '錄音中 {{time}}',
+    transcribing: '正在識別…',
+    polishing: '正在潤色…',
+    inserting: '正在插入…',
     cancelled: '已取消',
     error: '出錯了',
-    inserted: '已插入 {{count}}',
+    inserted: '已插入 {{count}} 字',
     translating: '正在翻譯',
   },
   qa: {

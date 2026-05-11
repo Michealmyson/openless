@@ -1136,6 +1136,7 @@ pub enum CapsuleState {
     Recording,
     Transcribing,
     Polishing,
+    Inserting,
     Done,
     Cancelled,
     Error,
