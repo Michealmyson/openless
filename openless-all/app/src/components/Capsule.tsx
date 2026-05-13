@@ -76,6 +76,13 @@ function ProcessingDots() {
   );
 }
 
+function formatElapsed(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
 interface CenterTextProps {
   os: OS;
   kind: 'default' | 'processing' | 'error';
@@ -119,8 +126,8 @@ interface CircleButtonProps {
 function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
   const { t } = useTranslation();
   const isCancel = variant === 'cancel';
-  const os = detectOS();
-  const useBackdrop = os !== 'win' && isCancel;
+  // confirm 是主操作锚点，纯白；cancel 半透 + 自带 backdrop blur 跟 pill 拉开层级。
+  const useBackdrop = isCancel;
   return (
     <button
       onClick={enabled ? onClick : undefined}
@@ -164,47 +171,110 @@ interface PillProps {
   os: OS;
   state: CapsuleState;
   level: number;
+  elapsedMs: number;
   insertedChars: number;
   message?: string;
   onCancel: () => void;
   onConfirm: () => void;
 }
 
-function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }: PillProps) {
+function Pill({ os, state, level, elapsedMs, insertedChars, message, onCancel, onConfirm }: PillProps) {
   const { t } = useTranslation();
   const metrics = getCapsulePillMetrics(os);
   const processingLayout = getCapsuleMessageLayout(os, 'processing');
   const enabled = state === 'recording';
 
+  // "thinking" 扫光速度：进入 transcribing/polishing 的头 2 秒走快速（0.9s/cycle，提示
+  // 「流式刚开始」），之后切回慢速（2.4s）作为稳态。切回 idle / done / 其他 state 也复位
+  // 为 fast，下次进入时从头开始 burst。
+  const [shineFast, setShineFast] = useState(true);
+  useEffect(() => {
+    if (state === 'transcribing' || state === 'polishing') {
+      setShineFast(true);
+      const t = setTimeout(() => setShineFast(false), 2000);
+      return () => clearTimeout(t);
+    }
+    setShineFast(true);
+    return undefined;
+  }, [state]);
+
   let center: JSX.Element;
   switch (state) {
     case 'recording':
-      center = <AudioBars level={level} />;
-      break;
-    case 'transcribing':
-    case 'polishing':
       center = (
         <div
           style={{
             display: 'inline-flex',
-            flexDirection: os === 'win' ? 'column' : 'row',
             alignItems: 'center',
-            gap: os === 'win' ? 4 : 6,
+            justifyContent: 'center',
+            gap: 7,
+            width: '100%',
+            maxWidth: metrics.textWidth,
+            minWidth: 0,
+          }}
+        >
+          <AudioBars level={level} />
+          <span
+            style={{
+              fontSize: 10.5,
+              fontWeight: 600,
+              color: 'var(--ol-ink-2)',
+              whiteSpace: 'nowrap',
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {t('capsule.recordingElapsed', { time: formatElapsed(elapsedMs) })}
+          </span>
+        </div>
+      );
+      break;
+    case 'transcribing':
+    case 'polishing':
+    case 'inserting': {
+      const processingText =
+        state === 'transcribing'
+          ? t('capsule.transcribing')
+          : state === 'polishing'
+            ? t('capsule.polishing')
+            : t('capsule.inserting');
+      center = (
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            // 左右 4px 内边距 + 外层 gap 已经让 "thinking" ↔ ✗/✓ 视觉间距落在 ~4-5px。
+            padding: '0 4px',
             width: '100%',
             maxWidth: metrics.textWidth,
             minWidth: 0,
             justifyContent: 'center',
+            // state 进入动画 —— 用户从 recording 切到 polishing 时多一道淡入提示，
+            // 比纯切换 center 内容更容易被感知。
+            animation: 'cap-state-enter 220ms var(--ol-motion-soft) both',
           }}
         >
-          <ProcessingDots />
           <span
             style={{
-              fontSize: 10.5,
-              fontWeight: 500,
+              // v1.3.1-7 用户拍板：黑色底字 + 蓝色扫光（亮黄太显眼，黑底更稳）。
+              // 字号保持 17，字重 700 → 600 稍细一些。
+              fontSize: 17,
+              fontWeight: 600,
+              letterSpacing: 0.3,
+              // line-height: 1 下 g/y/p 等下伸字符会被 clip，给 padding 留 descender 空间。
+              paddingBlock: 1,
               color: 'var(--ol-ink-2)',
+              backgroundImage:
+                'linear-gradient(100deg, var(--ol-ink) 0%, var(--ol-ink) 35%, var(--ol-blue) 50%, var(--ol-ink) 65%, var(--ol-ink) 100%)',
+              backgroundSize: '220% auto',
+              WebkitBackgroundClip: 'text',
+              backgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              // 进入流式的头 ~2 秒用 0.9s 高速扫光（视觉提示「刚开始」），之后 React 副作用
+              // 切到 2.4s 慢速。duration 变化时浏览器不重启动画，会平滑减速。
+              animation: `cap-shine ${shineFast ? '0.9s' : '2.4s'} linear infinite`,
               minWidth: 0,
               textAlign: 'center',
-              lineHeight: processingLayout.allowWrap ? 1.15 : 1,
+              lineHeight: processingLayout.allowWrap ? 1.3 : 1.25,
               whiteSpace: processingLayout.allowWrap ? 'normal' : 'nowrap',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
@@ -213,11 +283,12 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
               WebkitLineClamp: processingLayout.lineClamp,
             }}
           >
-            {t('capsule.thinking')}
+            {processingText}
           </span>
         </div>
       );
       break;
+    }
     case 'done':
       center = <CenterText os={os} kind="default" text={message || t('capsule.inserted', { count: insertedChars })} />;
       break;
@@ -234,7 +305,7 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   const ambient = state === 'recording' ? Math.min(1, Math.max(0, level)) : 0;
   const scale = os === 'win' ? 1 : 1 + ambient * 0.018;
   const shadowAlpha = 0.20 + ambient * 0.10;
-  const useBackdrop = os !== 'win';
+  const useBackdrop = true;
 
   return (
     <div
@@ -242,13 +313,13 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        gap: 8,
+        gap: 4,
         padding: '0 8px',
         width: metrics.width,
         height: metrics.height,
         boxSizing: metrics.boxSizing,
         borderRadius: 999,
-        background: 'rgba(255, 255, 255, 0.62)',
+        background: 'rgba(255, 255, 255, 0.85)',
         backdropFilter: useBackdrop ? 'blur(28px) saturate(180%)' : 'none',
         WebkitBackdropFilter: useBackdrop ? 'blur(28px) saturate(180%)' : 'none',
         border: '1px solid rgba(255, 255, 255, 0.55)',
@@ -272,15 +343,31 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   );
 }
 
+// 与 @keyframes capsule-out 的 0.36s 时长一致——必须同步，否则定时器先于
+// 动画结束就 unmount → 用户看到半截动画被截断。
+// v1.3.1-6: 从 240ms 加到 360ms 让用户看清退出动画（240ms 太快感知不到）。
+const EXIT_ANIM_MS = 360;
+// 初始可见 state：Tauri 内运行从 idle 开始（等后端 capsule:state 事件），
+// 浏览器 dev 模式从 recording 开始以便直接看到胶囊。
+const INITIAL_VISIBLE_STATE: CapsuleState = isTauri ? 'idle' : 'recording';
+
 export function Capsule() {
   const { t } = useTranslation();
   const os = detectOS();
   const metrics = getCapsulePillMetrics(os);
-  const [state, setState] = useState<CapsuleState>(isTauri ? 'idle' : 'recording');
+  const [state, setState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
   const [level, setLevel] = useState<number>(isTauri ? 0 : 0.6);
+  const [elapsedMs, setElapsedMs] = useState<number>(0);
   const [insertedChars, setInsertedChars] = useState<number>(0);
   const [message, setMessage] = useState<string | undefined>();
   const [translation, setTranslation] = useState<boolean>(false);
+  // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
+  // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
+  //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
+  // - 动画结束（EXIT_ANIM_MS）后再把 leaving 置回 false，组件回到「真正未挂载」分支。
+  // - 若期间 state 又切回非 idle（例如用户连按热键），立刻中止 leaving 并恢复显示。
+  const [leaving, setLeaving] = useState<boolean>(false);
+  const [lastVisibleState, setLastVisibleState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
   // Windows 端 host 在翻译模式从 84 长到 118；macOS / Linux 上 capsuleLayout 已固定 42 忽略此参数。
   const hostMetrics = getCapsuleHostMetrics(os, translation);
 
@@ -294,6 +381,7 @@ export function Capsule() {
         const p = event.payload;
         setState(p.state);
         setLevel(p.level ?? 0);
+        setElapsedMs(p.elapsedMs ?? 0);
         setMessage(p.message ?? undefined);
         if (p.insertedChars != null) setInsertedChars(p.insertedChars);
         setTranslation(p.translation === true);
@@ -307,6 +395,31 @@ export function Capsule() {
     };
   }, []);
 
+  // 退出动画调度：在 state 真正进入 idle 时，先用 capsule-out 播放 EXIT_ANIM_MS，再卸载。
+  // 设计要点：
+  // 1. 进入非 idle：清掉 leaving，记录最新可见 state；
+  // 2. 进入 idle 且之前可见：开启 leaving 并启动定时器；
+  // 3. 期间又被打回非 idle：cleanup 直接 clearTimeout，定时器不会触发，
+  //    新一轮 effect 会立即恢复可见态，避免错误地把可见状态切到 idle。
+  useEffect(() => {
+    if (state !== 'idle') {
+      // 立即恢复可见，并取消上一轮可能挂着的离场。
+      if (leaving) setLeaving(false);
+      setLastVisibleState(state);
+      return undefined;
+    }
+    // state === 'idle'：判断是不是从可见态过渡过来。
+    if (lastVisibleState === 'idle') return undefined;
+    setLeaving(true);
+    const timer = setTimeout(() => {
+      setLeaving(false);
+      setLastVisibleState('idle');
+    }, EXIT_ANIM_MS);
+    return () => clearTimeout(timer);
+    // 故意只依赖 state —— lastVisibleState / leaving 是内部派生量，
+    // 把它们加进依赖会让定时器被反复重建。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
 
   const onCancel = () => {
     void invokeOrMock<void>('cancel_dictation', undefined, () => undefined);
@@ -316,9 +429,13 @@ export function Capsule() {
     void invokeOrMock<void>('stop_dictation', undefined, () => undefined);
   };
 
-  if (state === 'idle') {
+  // 真正卸载：state 已是 idle，且不在离场动画中。
+  if (state === 'idle' && !leaving) {
     return <div style={{ width: 0, height: 0 }} />;
   }
+
+  // 离场时用 lastVisibleState 渲染最后一帧内容，避免把 idle 当作 fallback 走到 AudioBars(0)。
+  const renderedState: CapsuleState = state === 'idle' ? lastVisibleState : state;
 
   return (
     <div
@@ -337,7 +454,19 @@ export function Capsule() {
           : 0,
         paddingBottom: os === 'win' ? hostMetrics.bottomInset : 0,
         background: 'transparent',
-        animation: os === 'win' ? 'none' : 'capsule-in .22s cubic-bezier(.2,.9,.3,1.1)',
+        // 入场：中央 scaleX 由 0.18 长到 1（视觉上像从中心向两端展开）+ 淡入。
+        // 离场：scaleX 由 1 收缩回 0.18 + 向下偏移 8px + 淡出。
+        // 三平台一致 —— 旧版 Windows 走 animation:'none' 的分支已删除。
+        // transformOrigin 默认就是 50% 50%，所以 scaleX 天然以中央为锚点。
+        animation: leaving
+          // v1.3.1-6 调整：
+          // - 入场 .26s → .38s，cubic-bezier 加强 spring overshoot（更曲线感）
+          // - 出场 .24s → .36s（前面 EXIT_ANIM_MS 也同步到 360），曲线改成 ease-in-out 平滑
+          //   收缩 + 下移 + 淡出三段同步进行
+          ? 'capsule-out .36s cubic-bezier(.55,.06,.68,.19) forwards'
+          : 'capsule-in .38s cubic-bezier(.16,.86,.32,1.18) both',
+        transformOrigin: 'center',
+        willChange: 'transform, opacity',
       }}
     >
       {/* "正在翻译" 徽章 — 嵌套两层：
@@ -388,21 +517,35 @@ export function Capsule() {
       </div>
       <Pill
         os={os}
-        state={state}
-        level={level}
+        state={renderedState}
+        level={leaving ? 0 : level}
+        elapsedMs={elapsedMs}
         insertedChars={insertedChars}
         message={message}
         onCancel={onCancel}
         onConfirm={onConfirm}
       />
       <style>{`
+        /* 入场：从中央很窄的一小条（scaleX 0.18）+ 略压扁（scaleY 0.95）+ 透明，
+           长出到 scaleX 1 / scaleY 1 / 不透明。配合 wrapper 的 transformOrigin:center，
+           视觉上是「从中心向左右展开」。 */
         @keyframes capsule-in {
-          from { opacity: 0; transform: translateY(6px) scale(.96); }
-          to   { opacity: 1; transform: translateY(0) scale(1); }
+          from { opacity: 0; transform: scaleX(.18) scaleY(.95); }
+          to   { opacity: 1; transform: scaleX(1)   scaleY(1); }
         }
-        @keyframes cap-dot {
-          0%, 100% { opacity: 0.3; transform: scale(0.8); }
-          50%      { opacity: 1.0; transform: scale(1.0); }
+        /* 离场：scaleX 由 1 收回 0.18 + 整体向下偏移 8px + 淡出。
+           forwards 让最终帧（opacity:0、scaleX:.18）保持到组件被卸载。 */
+        @keyframes capsule-out {
+          from { opacity: 1; transform: scaleX(1)   translateY(0); }
+          to   { opacity: 0; transform: scaleX(.18) translateY(8px); }
+        }
+        @keyframes cap-shine {
+          0%   { background-position: 200% center; }
+          100% { background-position: -200% center; }
+        }
+        @keyframes cap-state-enter {
+          from { opacity: 0; transform: translateY(2px); }
+          to   { opacity: 1; transform: translateY(0); }
         }
       `}</style>
     </div>

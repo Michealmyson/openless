@@ -29,6 +29,7 @@ mod recorder;
 mod selection;
 mod shortcut_binding;
 mod types;
+mod unicode_keystroke;
 mod windows_ime_ipc;
 mod windows_ime_profile;
 mod windows_ime_protocol;
@@ -144,15 +145,15 @@ pub fn run() {
                 #[cfg(target_os = "windows")]
                 {
                     use window_vibrancy::apply_mica;
-                    // The window starts hidden so Windows native chrome can be disabled before
-                    // the first show; doing this after the native frame is visible is unreliable.
-                    if let Err(e) = main.set_decorations(false) {
-                        log::warn!("[main] disable native decorations failed: {e}");
-                    }
+                    // Windows 走 Tauri decorations:true 原生 Win11 标题栏 / 关闭按钮 /
+                    // 拖动 / 圆角 / resize border。保留 apply_mica 给原生 chrome 提供
+                    // 磨砂材质，配合 WindowChrome 半透明 background 让 sidebar 透出玻璃感。
                     if let Err(e) = apply_mica(&main, None) {
                         log::warn!("[main] mica failed: {e}");
                     }
-                    apply_windows_rounded_frame(&main);
+                    // Win11 22H2+: 把原生标题栏底色调成白色，与应用 sidebar 视觉统一。
+                    // 老版 Windows 静默失败，不阻塞。
+                    apply_windows_caption_color(&main);
                 }
                 // 静默启动开关：prefs.start_minimized = true → 不弹主窗口，
                 // 用户从菜单栏 / 托盘点击访问。开机自启时尤其有用，避免每次
@@ -337,16 +338,6 @@ pub fn run() {
                     if let tauri::WindowEvent::CloseRequested { ref api, .. } = event {
                         api.prevent_close();
                         hide_main_window(app);
-                    }
-                    #[cfg(target_os = "windows")]
-                    if matches!(
-                        event,
-                        tauri::WindowEvent::Resized(_)
-                            | tauri::WindowEvent::ScaleFactorChanged { .. }
-                    ) {
-                        if let Some(main) = app.get_webview_window("main") {
-                            apply_windows_rounded_frame(&main);
-                        }
                     }
                 }
             }
@@ -614,93 +605,40 @@ fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
     true
 }
 
+/// 把 Win11 原生标题栏底色刷成白色，与应用 sidebar 视觉统一。需要 Win11 22H2+
+/// (Build 22621+) 才支持 `DWMWA_CAPTION_COLOR`(35)；老 Windows 上 DwmSetWindowAttribute
+/// 返回错误，仅打 warn 不阻塞启动。
 #[cfg(target_os = "windows")]
-fn apply_windows_rounded_frame<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+fn apply_windows_caption_color<R: Runtime>(window: &tauri::WebviewWindow<R>) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{BOOL, HWND, RECT};
-    use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    };
-    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn, HRGN};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, GetWindowRect, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_THICKFRAME,
-    };
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR};
 
     let handle = match window.window_handle().map(|h| h.as_raw()) {
         Ok(RawWindowHandle::Win32(handle)) => handle,
         Ok(other) => {
-            log::warn!("[main] unexpected raw window handle for DWM frame: {other:?}");
+            log::warn!("[main] unexpected raw window handle for caption color: {other:?}");
             return;
         }
         Err(e) => {
-            log::warn!("[main] read raw window handle failed: {e}");
+            log::warn!("[main] read raw window handle for caption color failed: {e}");
             return;
         }
     };
     let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
 
+    // COLORREF 0x00BBGGRR 编码——选用 rgb(245,245,247) 跟 WindowChrome 的 glass linear-gradient
+    // 起始色一致，减小原生 caption bar 跟应用磨砂玻璃的色差（用户反馈：纯白 caption + 半透灰 glass
+    // 色差很丑）。R=0xF5 G=0xF5 B=0xF7 → COLORREF = 0x00F7F5F5。
+    let glass_match: u32 = 0x00F7F5F5;
     unsafe {
-        let style = GetWindowLongW(hwnd, GWL_STYLE);
-        let desired_style = (style | WS_THICKFRAME.0 as i32) & !(WS_CAPTION.0 as i32);
-        if style != desired_style {
-            SetWindowLongW(hwnd, GWL_STYLE, desired_style);
-            if let Err(e) = SetWindowPos(
-                hwnd,
-                HWND::default(),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
-            ) {
-                log::warn!("[main] refresh native frame after style update failed: {e}");
-            }
-        }
-
-        if window.is_maximized().unwrap_or(false) {
-            let _ = SetWindowRgn(hwnd, HRGN::default(), BOOL(1));
-            return;
-        }
-
-        let corner_preference = DWMWCP_ROUND;
         if let Err(e) = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &corner_preference as *const _ as *const core::ffi::c_void,
-            std::mem::size_of_val(&corner_preference) as u32,
+            DWMWA_CAPTION_COLOR,
+            &glass_match as *const _ as *const core::ffi::c_void,
+            std::mem::size_of_val(&glass_match) as u32,
         ) {
-            log::warn!("[main] set DWM rounded corners failed: {e}");
-        }
-
-        // Remove DWM's fallback 1px light border; the React shell draws the visual stroke.
-        let border_color_none: u32 = 0xFFFFFFFE;
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &border_color_none as *const _ as *const core::ffi::c_void,
-            std::mem::size_of_val(&border_color_none) as u32,
-        ) {
-            log::warn!("[main] remove DWM border color failed: {e}");
-        }
-
-        let mut rect = RECT::default();
-        if let Err(e) = GetWindowRect(hwnd, &mut rect) {
-            log::warn!("[main] read window rect for rounded region failed: {e}");
-            return;
-        }
-        let width = rect.right - rect.left;
-        let height = rect.bottom - rect.top;
-        if width <= 0 || height <= 0 {
-            return;
-        }
-        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 18, 18);
-        if region.is_invalid() {
-            log::warn!("[main] create rounded window region failed");
-            return;
-        }
-        if SetWindowRgn(hwnd, region, BOOL(1)) == 0 {
-            log::warn!("[main] apply rounded window region failed");
+            log::warn!("[main] set caption color failed (likely pre-22H2 Win): {e}");
         }
     }
 }
